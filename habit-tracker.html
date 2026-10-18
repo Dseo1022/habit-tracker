@@ -58,7 +58,9 @@
     padding-right: max(16px, env(safe-area-inset-right, 0px));
   }
   h1 { margin: 0 0 4px; font-size: 1.75rem; }
-  .today { color: var(--muted); margin: 0 0 24px; }
+  .today { color: var(--muted); margin: 0; }
+  .sync { color: var(--muted); font-size: 0.85rem; margin: 2px 0 24px; }
+  .sync.error { color: var(--danger); }
 
   form { display: flex; gap: 8px; margin-bottom: 24px; }
   input[type="text"] {
@@ -102,7 +104,7 @@
     line-height: 1;
   }
   .check.done { background: var(--accent); border-color: var(--accent); }
-  .name { flex: 1; font-weight: 600; word-break: break-word; }
+  .name { flex: 1; min-width: 0; font-weight: 600; word-break: break-word; }
   .streak { color: var(--muted); font-size: 0.9rem; white-space: nowrap; }
   .streak strong { color: var(--accent); font-size: 1.05rem; }
   .delete {
@@ -140,6 +142,7 @@
 <main>
   <h1>Habit Tracker</h1>
   <p class="today" id="today"></p>
+  <p class="sync" id="sync"></p>
 
   <form id="add-form">
     <input type="text" id="habit-input" placeholder="New habit, e.g. Read 20 minutes" maxlength="80" required>
@@ -152,25 +155,121 @@
 
 <script>
   const STORAGE_KEY = "habit-tracker-v1";
+  const SYNCED_KEY = "habit-tracker-v1-synced";
 
-  // Each habit: { id, name, done: { "YYYY-MM-DD": true } }
-  let habits = load();
+  // Each habit: { id, name, created, done: { "YYYY-MM-DD": true } }
+  let habits = readLocal();
   let pendingDelete = null; // id of the habit awaiting delete confirmation
 
-  function load() {
+  // When the page runs as a Claude artifact, habits live in the viewer's
+  // private collection in the artifact's database and sync across devices.
+  // Opened as a plain file, they stay in this browser's localStorage.
+  let cloud = null;
+  let loading = false;
+  const writeQueue = {}; // habit id -> last pending write, so writes to one doc never overlap
+
+  function readLocal() {
     try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+      // Older entries have no `created`; their id is a base-36 timestamp.
+      return saved.map(h => ({ ...h, created: h.created ?? (parseInt(h.id, 36) || 0) }));
     } catch {
       return [];
     }
   }
 
-  function save() {
+  function writeLocal() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(habits));
     } catch {
       // Storage unavailable (e.g. private mode); keep working in memory.
     }
+  }
+
+  function setStatus(text, isError = false) {
+    const el = document.getElementById("sync");
+    el.textContent = text;
+    el.classList.toggle("error", isError);
+  }
+
+  // Save one habit, or its deletion, wherever this page keeps data.
+  function persist(habit, removed = false) {
+    if (!cloud) {
+      writeLocal();
+      return;
+    }
+    const ref = cloud.doc(habit.id);
+    const body = { name: habit.name, created: habit.created, done: { ...habit.done } };
+    const prev = writeQueue[habit.id] || Promise.resolve();
+    writeQueue[habit.id] = prev
+      .then(() => (removed ? ref.delete() : ref.set(body)))
+      .catch(err => {
+        const msg = err?.code === "quota_exceeded"
+          ? "Storage is full. Delete a habit to make room."
+          : "Couldn't save your last change. Check your connection and try again.";
+        setStatus(msg, true);
+      });
+  }
+
+  function fromDoc(doc) {
+    const data = doc.data() || {};
+    return {
+      id: doc.id,
+      name: typeof data.name === "string" ? data.name : "Untitled habit",
+      created: typeof data.created === "number" ? data.created : 0,
+      done: { ...(data.done || {}) },
+    };
+  }
+
+  async function connectCloud() {
+    if (!window.claude?.use) {
+      setStatus("Saved in this browser only.");
+      return;
+    }
+    // Don't show this browser's copy while the synced list loads; it may be stale.
+    habits = [];
+    loading = true;
+    setStatus("Loading your habits…");
+    render();
+
+    const [db, user] = await Promise.all([claude.use("db"), claude.use("user")]);
+    const uid = user ? await user.id() : null;
+    if (!db || !uid) {
+      habits = readLocal();
+      loading = false;
+      setStatus("Saved on this device only. Sign in to Claude to sync across devices.");
+      render();
+      return;
+    }
+
+    cloud = db.collection("data/users/" + uid);
+    let checkedForLocal = false;
+
+    cloud.orderBy("created").onSnapshot(snap => {
+      // Once the server answers, copy up any habits saved in this browser
+      // before sync existed (only if the account has none yet).
+      if (!checkedForLocal && !snap.metadata.fromCache) {
+        checkedForLocal = true;
+        const local = readLocal();
+        let alreadySynced = false;
+        try { alreadySynced = localStorage.getItem(SYNCED_KEY) === "1"; } catch {}
+        if (snap.empty && local.length && !alreadySynced) {
+          habits = local;
+          habits.forEach(h => persist(h));
+          try { localStorage.setItem(SYNCED_KEY, "1"); } catch {}
+          loading = false;
+          setStatus("Synced to your Claude account.");
+          render();
+          return;
+        }
+      }
+      habits = snap.docs.map(fromDoc);
+      loading = snap.empty && snap.metadata.fromCache;
+      if (!loading) setStatus("Synced to your Claude account.");
+      render();
+    }, () => {
+      setStatus("Sync stopped. Reload the page to reconnect.", true);
+    });
   }
 
   // Date key in local time, so "today" matches the user's calendar.
@@ -204,14 +303,20 @@
     pendingDelete = null;
     if (habit.done[key]) delete habit.done[key];
     else habit.done[key] = true;
-    save();
+    persist(habit);
     render();
   }
 
   function render() {
     const list = document.getElementById("list");
     list.innerHTML = "";
-    document.getElementById("empty").hidden = habits.length > 0;
+    const empty = document.getElementById("empty");
+    empty.hidden = habits.length > 0;
+    empty.textContent = loading
+      ? "Loading your habits…"
+      : "No habits yet. Add one above to get started.";
+    // Adding waits for the synced list, so nothing lands in the wrong place.
+    document.querySelectorAll("#add-form input, #add-form button").forEach(el => { el.disabled = loading; });
 
     const todayKey = dateKey(daysAgo(0));
 
@@ -249,7 +354,7 @@
         if (confirming) {
           habits = habits.filter(h => h.id !== habit.id);
           pendingDelete = null;
-          save();
+          persist(habit, true);
         } else {
           pendingDelete = habit.id;
         }
@@ -282,8 +387,10 @@
     const input = document.getElementById("habit-input");
     const name = input.value.trim();
     if (!name) return;
-    habits.push({ id: Date.now().toString(36), name, done: {} });
-    save();
+    const now = Date.now();
+    const habit = { id: now.toString(36), name, created: now, done: {} };
+    habits.push(habit);
+    persist(habit);
     render();
     input.value = "";
     input.focus();
@@ -293,6 +400,7 @@
     new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
 
   render();
+  connectCloud();
 </script>
 </body>
 </html>

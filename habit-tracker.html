@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Habit Tracker</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --card: #ffffff;
+    --text: #1f1f1f;
+    --muted: #6b6b6b;
+    --border: #e2e0db;
+    --accent: #2f7d5b;
+    --accent-soft: #e3f1ea;
+    --on-accent: #ffffff;
+    --danger: #b3412f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161616;
+      --card: #202020;
+      --text: #ececec;
+      --muted: #9a9a9a;
+      --border: #333;
+      --accent: #4fb386;
+      --accent-soft: #1f3a2d;
+      --on-accent: #0e1f17;
+      --danger: #e0715f;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161616;
+    --card: #202020;
+    --text: #ececec;
+    --muted: #9a9a9a;
+    --border: #333;
+    --accent: #4fb386;
+    --accent-soft: #1f3a2d;
+    --on-accent: #0e1f17;
+    --danger: #e0715f;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main {
+    max-width: 640px;
+    margin: 0 auto;
+    padding-block: 32px 64px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  h1 { margin: 0 0 4px; font-size: 1.75rem; }
+  .today { color: var(--muted); margin: 0 0 24px; }
+
+  form { display: flex; gap: 8px; margin-bottom: 24px; }
+  input[type="text"] {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 12px;
+    font: inherit;
+    color: inherit;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button { font: inherit; cursor: pointer; }
+  .add-btn {
+    padding: 10px 16px;
+    background: var(--accent);
+    color: var(--on-accent);
+    border: none;
+    border-radius: 8px;
+    font-weight: 600;
+  }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+  .habit {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+  }
+  .habit-top { display: flex; align-items: center; gap: 12px; }
+  .check {
+    flex: none;
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    background: transparent;
+    color: var(--on-accent);
+    font-size: 18px;
+    line-height: 1;
+  }
+  .check.done { background: var(--accent); border-color: var(--accent); }
+  .name { flex: 1; font-weight: 600; word-break: break-word; }
+  .streak { color: var(--muted); font-size: 0.9rem; white-space: nowrap; }
+  .streak strong { color: var(--accent); font-size: 1.05rem; }
+  .delete {
+    background: none; border: none; color: var(--muted);
+    font-size: 1.2rem; padding: 4px 6px; border-radius: 6px;
+  }
+  .delete:hover { color: var(--danger); }
+  .delete.confirming {
+    color: var(--danger);
+    border: 1px solid var(--danger);
+    font-size: 0.8rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .week { display: flex; gap: 6px; margin-top: 12px; padding-left: 48px; }
+  .day {
+    flex: 1;
+    max-width: 44px;
+    padding: 4px 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.7rem;
+    text-align: center;
+  }
+  .day.done { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+  .day.is-today { font-weight: 700; }
+
+  .empty { color: var(--muted); text-align: center; padding: 32px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Habit Tracker</h1>
+  <p class="today" id="today"></p>
+
+  <form id="add-form">
+    <input type="text" id="habit-input" placeholder="New habit, e.g. Read 20 minutes" maxlength="80" required>
+    <button class="add-btn" type="submit">Add</button>
+  </form>
+
+  <ul id="list"></ul>
+  <p class="empty" id="empty">No habits yet. Add one above to get started.</p>
+</main>
+
+<script>
+  const STORAGE_KEY = "habit-tracker-v1";
+
+  // Each habit: { id, name, done: { "YYYY-MM-DD": true } }
+  let habits = load();
+  let pendingDelete = null; // id of the habit awaiting delete confirmation
+
+  function load() {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+    } catch {
+      return [];
+    }
+  }
+
+  function save() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(habits));
+    } catch {
+      // Storage unavailable (e.g. private mode); keep working in memory.
+    }
+  }
+
+  // Date key in local time, so "today" matches the user's calendar.
+  function dateKey(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+
+  function daysAgo(n) {
+    const d = new Date();
+    d.setHours(12, 0, 0, 0); // midday avoids DST edge cases
+    d.setDate(d.getDate() - n);
+    return d;
+  }
+
+  // Consecutive days completed, counting back from today.
+  // If today isn't checked yet, the streak from yesterday still counts.
+  function streak(habit) {
+    let count = 0;
+    let i = habit.done[dateKey(daysAgo(0))] ? 0 : 1;
+    while (habit.done[dateKey(daysAgo(i))]) {
+      count++;
+      i++;
+    }
+    return count;
+  }
+
+  function toggle(habit, key) {
+    pendingDelete = null;
+    if (habit.done[key]) delete habit.done[key];
+    else habit.done[key] = true;
+    save();
+    render();
+  }
+
+  function render() {
+    const list = document.getElementById("list");
+    list.innerHTML = "";
+    document.getElementById("empty").hidden = habits.length > 0;
+
+    const todayKey = dateKey(daysAgo(0));
+
+    for (const habit of habits) {
+      const li = document.createElement("li");
+      li.className = "habit";
+
+      const top = document.createElement("div");
+      top.className = "habit-top";
+
+      const check = document.createElement("button");
+      const doneToday = !!habit.done[todayKey];
+      check.className = "check" + (doneToday ? " done" : "");
+      check.textContent = doneToday ? "✓" : "";
+      check.title = doneToday ? "Mark as not done today" : "Mark as done today";
+      check.setAttribute("aria-pressed", doneToday);
+      check.onclick = () => toggle(habit, todayKey);
+
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = habit.name;
+
+      const s = streak(habit);
+      const streakEl = document.createElement("span");
+      streakEl.className = "streak";
+      streakEl.innerHTML = `🔥 <strong>${s}</strong> day${s === 1 ? "" : "s"}`;
+
+      // Two-step delete: first tap asks, second tap deletes.
+      const del = document.createElement("button");
+      const confirming = pendingDelete === habit.id;
+      del.className = "delete" + (confirming ? " confirming" : "");
+      del.textContent = confirming ? "Delete?" : "×";
+      del.title = confirming ? `Tap again to delete "${habit.name}"` : "Delete habit";
+      del.onclick = () => {
+        if (confirming) {
+          habits = habits.filter(h => h.id !== habit.id);
+          pendingDelete = null;
+          save();
+        } else {
+          pendingDelete = habit.id;
+        }
+        render();
+      };
+
+      top.append(check, name, streakEl, del);
+
+      // Last 7 days, so a missed check-in can be filled in.
+      const week = document.createElement("div");
+      week.className = "week";
+      for (let i = 6; i >= 0; i--) {
+        const d = daysAgo(i);
+        const key = dateKey(d);
+        const day = document.createElement("button");
+        day.className = "day" + (habit.done[key] ? " done" : "") + (i === 0 ? " is-today" : "");
+        day.textContent = d.toLocaleDateString(undefined, { weekday: "short" }).slice(0, 2);
+        day.title = d.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+        day.onclick = () => toggle(habit, key);
+        week.append(day);
+      }
+
+      li.append(top, week);
+      list.append(li);
+    }
+  }
+
+  document.getElementById("add-form").addEventListener("submit", e => {
+    e.preventDefault();
+    const input = document.getElementById("habit-input");
+    const name = input.value.trim();
+    if (!name) return;
+    habits.push({ id: Date.now().toString(36), name, done: {} });
+    save();
+    render();
+    input.value = "";
+    input.focus();
+  });
+
+  document.getElementById("today").textContent =
+    new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+
+  render();
+</script>
+</body>
+</html>
